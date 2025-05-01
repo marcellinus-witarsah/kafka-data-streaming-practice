@@ -1,0 +1,119 @@
+services:
+# notes\
+# Image: It uses redpandadata/redpanda:v24.2.18, pulling the Redpanda Docker image at version 24.2.18.
+# Container name: It names the container redpanda-1, so you can easily reference it.
+
+# Command: Overrides the default container command to run Redpanda manually with custom flags:
+# --smp '1': Limit Redpanda to 1 CPU core (good for local/dev environments).
+# --reserve-memory 0M and --overprovisioned: Tell Redpanda it's in a low-resource setup (again, typical for development).
+# --node-id '1': Sets this node's ID to 1 (important for clustering if you had more nodes).
+# --kafka-addr and --advertise-kafka-addr: Configure how Kafka clients connect internally (PLAINTEXT://redpanda-1:29092) and externally (OUTSIDE://localhost:9092).
+# --pandaproxy-addr and --advertise-pandaproxy-addr: Same concept but for PandaProxy (HTTP API for Kafka).
+# --rpc-addr and --advertise-rpc-addr: Setup internal Redpanda communication between nodes.
+
+# Ports: Maps ports from inside the container to your host machine:
+# 9092 (Kafka external access),
+# 29092 (Kafka internal cluster access),
+# 8082 and 28082 (PandaProxy).
+  redpanda-1:
+    image: redpandadata/redpanda:v24.2.18
+    container_name: redpanda-1
+    command:
+      - redpanda
+      - start
+      - --smp
+      - '1'
+      - --reserve-memory
+      - 0M
+      - --overprovisioned
+      - --node-id
+      - '1'
+      - --kafka-addr
+      - PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:9092  # address internal for kafka clients to connect
+      - --advertise-kafka-addr
+      - PLAINTEXT://redpanda-1:29092,OUTSIDE://localhost:9092  # external address for kafka clients to connect to redpanda
+      - --pandaproxy-addr
+      - PLAINTEXT://0.0.0.0:28082,OUTSIDE://0.0.0.0:8082  # internal address for clients to connect to kafka without using Kafka SDK
+      - --advertise-pandaproxy-addr
+      - PLAINTEXT://redpanda-1:28082,OUTSIDE://localhost:8082  # external address for clients to connect to kafka without using Kafka SDK
+      - --rpc-addr
+      - 0.0.0.0:33145  # internal address that listens to any RPC calls
+      - --advertise-rpc-addr
+      - redpanda-1:33145  # external address to each when you want to perform RPC calls (for internal application calls)
+    ports:
+      - 8082:8082 # Panda proxy external port access
+      - 28082:28082 # Panda proxy internal port access (for applications inside the docker network)
+      - 9092:9092 # Kafka external port access 
+      - 29092:29092 # Kafka internal port access (for applications inside the docker network)
+
+  jobmanager:
+    build:
+      context: .
+      dockerfile: ./Dockerfile.flink
+      platforms:
+        - "linux/amd64"
+        - "linux/arm64"
+    image: pyflink:1.16.0
+    container_name: "flink-jobmanager"
+    pull_policy: never
+    platform: "linux/amd64"
+    hostname: "jobmanager"
+    expose:
+      - "6123"
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./:/opt/flink/usrlib
+      - ./keys/:/var/private/ssl/
+      - ./src/:/opt/src
+    command: jobmanager 
+    extra_hosts:
+      - "host.docker.internal:127.0.0.1" #// Linux
+      - "host.docker.internal:host-gateway" #// Access services on the host machine from within the Docker container
+    environment:
+      - POSTGRES_URL=${POSTGRES_URL:-jdbc:postgresql://host.docker.internal:5432/postgres}
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - POSTGRES_DB=${POSTGRES_DB:-postgres}
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: jobmanager        
+  
+  # Flink task manager
+  taskmanager:
+    image: pyflink:1.16.0
+    container_name: "flink-taskmanager"
+    pull_policy: never
+    platform: "linux/amd64"
+    expose:
+      - "6121"
+      - "6122"
+    volumes:
+      - ./:/opt/flink/usrlib
+      - ./src/:/opt/src
+    depends_on:
+      - jobmanager
+    command: taskmanager --taskmanager.registration.timeout 5 min
+    extra_hosts:
+      - "host.docker.internal:127.0.0.1"
+      - "host.docker.internal:host-gateway"
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: jobmanager
+        taskmanager.numberOfTaskSlots: 15
+        parallelism.default: 3
+  postgres:
+    image: postgres:14
+    restart: on-failure  # restart whenever the container failes
+    container_name: "postgres"
+    environment:  # environment variables
+      - POSTGRES_DB=postgres
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+    ports:
+      - "5432:5432"  # port that will be exposed to the host machine
+    extra_hosts:
+      - "host.docker.internal:127.0.0.1" # when try to connect to docker host internal it will you can use some default locahost address is 127.0.0.1
+      - "host.docker.internal:host-gateway" # is a special feature from docker that dynamically maps the host machine actuak IP address to the container
+
